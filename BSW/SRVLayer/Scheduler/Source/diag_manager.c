@@ -1,55 +1,76 @@
 
 #include "diag_manager.h"
-#include "CodeGen_Logging.h"
 #include "task_config.h"
-#include "system_cfg.h"
 #include "stm32h7xx_hal.h"
+#include <string.h>
 
-/* Diagnostics manager handles fault reporting, logging and watchdog servicing.
-   The hardware watchdog is not enabled per project configuration. The
-   service function is a noop when watchdog is disabled. */
+/* Simple diagnostics representation */
+#define DIAG_MAX_FAULTS    (16u)
 
-static volatile uint32_t diag_fault_bitmap = 0u;
+static uint32_t g_fault_bitmap[DIAG_MAX_FAULTS / 32u];
+static volatile bool g_faults_present = false;
 
-void Diag_Init(void)
+void DiagManager_Init(void)
 {
-    /* Initialize logging interface if present */
-    (void)CodeGen_Logging_Init(); /* CodeGen_Logging.h expected to expose this */
-    diag_fault_bitmap = 0u;
+    memset(g_fault_bitmap, 0x00u, sizeof(g_fault_bitmap));
+    g_faults_present = false;
 
 #if (WATCHDOG_ENABLE != 0u)
-    /* Initialize watchdog peripheral (IWDG) if enabled (not enabled in config) */
-    /* Implementation would go here */
+    /* If watchdog enabled, initialize and configure (hardware-specific).
+       For the generated code we leave integration points here. */
+    /* Example: MX_IWDG_Init(); */
 #endif
 }
 
-void Diag_ReportFault(uint32_t fault_id)
+void DiagManager_Process(void)
 {
-    diag_fault_bitmap |= (1u << (fault_id & 31u));
-    /* Log event */
-    (void)CodeGen_Logging_LogEvent("DIAG", "FAULT", fault_id);
-}
-
-void Diag_ClearFault(uint32_t fault_id)
-{
-    diag_fault_bitmap &= ~(1u << (fault_id & 31u));
-    (void)CodeGen_Logging_LogEvent("DIAG", "CLEAR", fault_id);
-}
-
-void Diag_Heartbeat(void)
-{
-    /* Periodic heartbeat for diagnostics */
-    (void)CodeGen_Logging_LogEvent("DIAG", "HEART", 0u);
-}
-
-void Diag_ServiceWatchdog(void)
-{
+    /* Periodic processing: check system health, escalate faults if required.
+       If watchdog is enabled the diag manager must service it here. */
 #if (WATCHDOG_ENABLE != 0u)
-    /* Pet the watchdog here. Implementation depends on chosen watchdog (IWDG/WDT). */
-    /* HAL_IWDG_Refresh(&hiwdg); */
-#else
-    /* No-op when watchdog disabled */
-    (void)0u;
+    /* Service watchdog: example pseudo-call:
+       IWDG_Refresh(); */
 #endif
+    /* No-op if no faults */
+    (void)g_fault_bitmap;
+}
+
+void DiagManager_ReportFault(uint32_t fault_id)
+{
+    uint32_t idx;
+    uint32_t bit;
+    if (fault_id >= (DIAG_MAX_FAULTS)) { return; }
+    idx = (fault_id / 32u);
+    bit = (1u << (fault_id & 31u));
+    g_fault_bitmap[idx] |= bit;
+    g_faults_present = true;
+}
+
+void DiagManager_ClearFault(uint32_t fault_id)
+{
+    uint32_t idx;
+    uint32_t bit;
+    if (fault_id >= (DIAG_MAX_FAULTS)) { return; }
+    idx = (fault_id / 32u);
+    bit = (1u << (fault_id & 31u));
+    g_fault_bitmap[idx] &= ~bit;
+    /* Recompute presence flag conservatively */
+    {
+        uint32_t i;
+        bool any = false;
+        for (i = 0u; i < (DIAG_MAX_FAULTS / 32u); ++i)
+        {
+            if (g_fault_bitmap[i] != 0u)
+            {
+                any = true;
+                break;
+            }
+        }
+        g_faults_present = any;
+    }
+}
+
+bool DiagManager_HasFaults(void)
+{
+    return g_faults_present;
 }
 

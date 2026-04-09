@@ -1,129 +1,189 @@
 
 #include "scheduler.h"
-#include "task_config.h"
-#include "cmsis_os2.h"
 #include "stm32h7xx_hal.h"
-#include "diag_manager.h"
+#include <string.h>
 
-/* ASW task declarations (must be provided by ASW integration) */
-extern void Dynamic_address_assignment_Task(void);
-extern void Dynamic_address_assignment_ISR(void);
-
-extern void Soc_estimation_Task(void);
-extern void Soc_estimation_ISR(void);
-
-extern void Passive_Cell_balancing_Task(void);
-extern void Passive_Cell_balancing_ISR(void);
-
-/* Internal handlers */
-static osThreadId_t soc_thread_id = NULL;
-static osTimerId_t daa_timer_id = NULL;
-static osTimerId_t pcb_timer_id = NULL;
-
-/* Timer callbacks that wrap module tasks */
-static void DAA_TimerCallback(void *argument)
+typedef struct
 {
-    (void)argument;
-    Dynamic_address_assignment_Task();
-}
+    const char * name;
+    TaskEntry_t entry;
+    uint32_t period_ms;
+    uint8_t priority;
+    bool enabled;
+    uint32_t last_run_tick;
+} SchedulerTask_t;
 
-static void PCB_TimerCallback(void *argument)
+static SchedulerTask_t g_tasks[SCHEDULER_MAX_TASKS];
+static uint32_t g_task_count = 0u;
+static volatile uint32_t g_tick_count = 0u;
+static bool g_scheduler_running = false;
+
+/* ISR registry (not used to execute tasks in ISR, but for vector binding) */
+#define MAX_ISR_REGISTRY 8u
+typedef struct
 {
-    (void)argument;
-    Passive_Cell_balancing_Task();
-}
-
-/* SOC estimation RTOS thread function */
-static void SocEstimation_Thread(void *argument)
-{
-    (void)argument;
-
-    const uint32_t period = PERIOD_SOC_ESTIMATION_MS;
-    for (;;)
-    {
-        Soc_estimation_Task();
-        /* Delay until next period */
-        osDelay(period);
-    }
-}
+    const char * name;
+    IsrEntry_t isr;
+} ISRReg_t;
+static ISRReg_t g_isr_reg[MAX_ISR_REGISTRY];
+static uint32_t g_isr_count = 0u;
 
 void Scheduler_Init(void)
 {
-    /* Initialize CMSIS-RTOS2 kernel */
-    (void)osKernelInitialize();
-
-    /* Create SOC estimation RTOS task if enabled */
-#if (ENABLE_SOC_ESTIMATION != 0u)
-    const osThreadAttr_t soc_attr = {
-        .name = SOC_ESTIMATION_TASK_NAME,
-        .stack_size = (uint32_t)SOC_ESTIMATION_STACK_SIZE_BYTES,
-        .priority = SOC_TASK_PRIORITY
-    };
-    soc_thread_id = osThreadNew(SocEstimation_Thread, NULL, &soc_attr);
-    if (soc_thread_id == NULL)
+    uint32_t i;
+    for (i = 0u; i < SCHEDULER_MAX_TASKS; ++i)
     {
-        Diag_ReportFault(1u); /* Fault ID 1: SOC thread creation failed */
+        g_tasks[i].name = NULL;
+        g_tasks[i].entry = (TaskEntry_t)0u;
+        g_tasks[i].period_ms = 0u;
+        g_tasks[i].priority = 0u;
+        g_tasks[i].enabled = false;
+        g_tasks[i].last_run_tick = 0u;
     }
-#endif
+    g_task_count = 0u;
+    g_tick_count = 0u;
+    g_scheduler_running = false;
 
-    /* Create timers for periodic tasks (timer-driven execution) */
-#if (ENABLE_DYNAMIC_ADDRESS_ASSIGNMENT != 0u)
-    const osTimerAttr_t daa_timer_attr = { .name = "DAA_Timer" };
-    daa_timer_id = osTimerNew(DAA_TimerCallback, osTimerPeriodic, NULL, &daa_timer_attr);
-    if (daa_timer_id == NULL)
+    for (i = 0u; i < MAX_ISR_REGISTRY; ++i)
     {
-        Diag_ReportFault(2u); /* Fault ID 2: DAA timer creation failed */
+        g_isr_reg[i].name = NULL;
+        g_isr_reg[i].isr = (IsrEntry_t)0u;
     }
-#endif
+    g_isr_count = 0u;
+}
 
-#if (ENABLE_PASSIVE_CELL_BALANCING != 0u)
-    const osTimerAttr_t pcb_timer_attr = { .name = "PCB_Timer" };
-    pcb_timer_id = osTimerNew(PCB_TimerCallback, osTimerPeriodic, NULL, &pcb_timer_attr);
-    if (pcb_timer_id == NULL)
+void Scheduler_RegisterTask(const char * name,
+                            TaskEntry_t entry,
+                            uint32_t period_ms,
+                            uint8_t priority,
+                            bool enabled)
+{
+    if ((g_task_count >= SCHEDULER_MAX_TASKS) || (entry == (TaskEntry_t)0u))
     {
-        Diag_ReportFault(3u); /* Fault ID 3: Passive balancing timer creation failed */
+        return;
     }
-#endif
+    g_tasks[g_task_count].name = name;
+    g_tasks[g_task_count].entry = entry;
+    g_tasks[g_task_count].period_ms = (period_ms == 0u) ? 1u : period_ms;
+    g_tasks[g_task_count].priority = priority;
+    g_tasks[g_task_count].enabled = enabled;
+    g_tasks[g_task_count].last_run_tick = 0u;
+    ++g_task_count;
+}
+
+void Scheduler_RegisterISR(const char * name, IsrEntry_t isr)
+{
+    if ((g_isr_count >= MAX_ISR_REGISTRY) || (isr == (IsrEntry_t)0u))
+    {
+        return;
+    }
+    g_isr_reg[g_isr_count].name = name;
+    g_isr_reg[g_isr_count].isr = isr;
+    ++g_isr_count;
 }
 
 void Scheduler_Start(void)
 {
-    /* Start timers and kernel */
-#if (ENABLE_DYNAMIC_ADDRESS_ASSIGNMENT != 0u)
-    (void)osTimerStart(daa_timer_id, PERIOD_DYNAMIC_ADDRESS_ASSIGNMENT_MS);
-#endif
-
-#if (ENABLE_PASSIVE_CELL_BALANCING != 0u)
-    (void)osTimerStart(pcb_timer_id, PERIOD_PASSIVE_CELL_BALANCING_MS);
-#endif
-
-    /* Start RTOS kernel: starts the soc thread and timers */
-    (void)osKernelStart();
+    g_scheduler_running = true;
 }
 
-/* Hook to register generic periodic tasks (not used internally, but exported) */
-void Scheduler_RegisterPeriodicTask(void (*task)(void), uint32_t period_ms)
+void Scheduler_Stop(void)
 {
-    /* Create a dedicated timer for the task using osTimer API */
-    if (task == NULL)
+    g_scheduler_running = false;
+}
+
+void Scheduler_TickHandler(void)
+{
+    /* Called from timer ISR context; increment tick */
+    ++g_tick_count;
+}
+
+static int compare_priority(const void * a, const void * b)
+{
+    const SchedulerTask_t * ta = (const SchedulerTask_t *)a;
+    const SchedulerTask_t * tb = (const SchedulerTask_t *)b;
+    /* lower numeric value = higher priority */
+    if (ta->priority < tb->priority) return -1;
+    if (ta->priority > tb->priority) return 1;
+    return 0;
+}
+
+void Scheduler_Dispatch(void)
+{
+    uint32_t i;
+    uint32_t current_tick;
+    if (!g_scheduler_running)
     {
         return;
     }
 
-    /* We use a simple wrapper: allocate a timer per registration. */
-    /* Note: For simplicity we rely on a small local trampoline function via osTimerNew
-       requiring a static function; in production code a dynamic trampoline or
-       context object is preferable. This function is left unimplemented here. */
-    (void)task;
-    (void)period_ms;
+    current_tick = g_tick_count;
+
+    /* Simple scheduling: iterate tasks by priority order */
+    /* Make a local copy and sort by priority to ensure deterministic order */
+    SchedulerTask_t local_tasks[SCHEDULER_MAX_TASKS];
+    uint32_t local_count = 0u;
+
+    for (i = 0u; i < g_task_count; ++i)
+    {
+        local_tasks[local_count++] = g_tasks[i];
+    }
+
+    /* Simple insertion sort (small N) to maintain MISRA friendliness */
+    for (i = 1u; i < local_count; ++i)
+    {
+        SchedulerTask_t key = local_tasks[i];
+        int32_t j = (int32_t)i - 1;
+        while ((j >= 0) && (local_tasks[j].priority > key.priority))
+        {
+            local_tasks[j + 1] = local_tasks[j];
+            --j;
+        }
+        local_tasks[j + 1] = key;
+    }
+
+    for (i = 0u; i < local_count; ++i)
+    {
+        SchedulerTask_t * t = &local_tasks[i];
+        uint32_t elapsed;
+        if ((t->enabled == false) || (t->entry == (TaskEntry_t)0u))
+        {
+            continue;
+        }
+        /* Compute elapsed time in ms since last_run_tick */
+        if (current_tick >= t->last_run_tick)
+        {
+            elapsed = current_tick - t->last_run_tick;
+        }
+        else
+        {
+            /* Tick wrapped - handle wrap-around safely */
+            elapsed = (UINT32_MAX - t->last_run_tick) + current_tick + 1u;
+        }
+
+        if (elapsed >= t->period_ms)
+        {
+            /* Update the actual g_tasks[] table to reflect last_run_tick */
+            /* Find real task index and update to keep state across dispatch calls */
+            uint32_t k;
+            for (k = 0u; k < g_task_count; ++k)
+            {
+                if (g_tasks[k].entry == t->entry)
+                {
+                    g_tasks[k].last_run_tick = current_tick;
+                    break;
+                }
+            }
+            /* Execute task in main loop context (per handler_type: Main loop) */
+            t->entry();
+        }
+    }
 }
 
-/* Hook to register ISR handlers: in this architecture ISRs should be declared
-   and bound in the vector table. This function provides a registration point
-   but actual binding is platform specific. */
-void Scheduler_RegisterISRHandler(void (*isr)(void))
+/* Provide wrapper to allow TIM IRQ to call HAL handler */
+void Scheduler_TimerIRQHandler(void)
 {
-    (void)isr;
-    /* Binding is platform-specific and handled elsewhere */
+    /* Increment tick (ms) */
+    Scheduler_TickHandler();
 }
 

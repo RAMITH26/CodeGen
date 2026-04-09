@@ -9,6 +9,11 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
+/* Initialization function prototype type */
+typedef void (*InitFunc_t)(void);
+
+/* Register initialization functions in correct order and allow invocation */
+void InitHandlers_RegisterAll(void);
 void InitHandlers_InitAll(void);
 void InitHandlers_DeinitAll(void);
 

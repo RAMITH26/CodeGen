@@ -8,17 +8,16 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "task_config.h"
 
-/* System clock configuration (in MHz as provided by wizard) */
-#define SYSTEM_CLOCK_MHZ   (8u)
-
-/* Watchdog configuration */
-#define WATCHDOG_ENABLE    (0u) /* 0 = Disabled, 1 = Enabled */
-#define WATCHDOG_TIMEOUT_MS  (0u)
-#define WATCHDOG_RESET_MODE  (0u)
-
+/* System configuration functions */
 void System_Init(void);
 void SystemClock_Config(void);
+void MX_TIM2_Init(void);
+void MX_NVIC_Config(void);
+
+/* TIM handle exported for scheduler use */
+extern TIM_HandleTypeDef htim2;
 
 #ifdef __cplusplus
 }

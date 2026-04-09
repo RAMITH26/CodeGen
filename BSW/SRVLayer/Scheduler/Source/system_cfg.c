@@ -1,65 +1,80 @@
 
 #include "system_cfg.h"
 #include "stm32h7xx_hal.h"
+#include <stddef.h>
 
-/* Minimal, portable system initialization for STM32H7
-   Configures HAL and system clock to the required frequency.
-   NOTE: This file is self-contained and safe to call from main(). */
+/* TIM handle for 1 ms tick generation using TIM2 */
+TIM_HandleTypeDef htim2;
 
 void System_Init(void)
 {
-    /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-    (void)HAL_Init();
-
-    /* Configure the system clock to SYSTEM_CLOCK_MHZ MHz. */
+    HAL_Init();
     SystemClock_Config();
+    MX_TIM2_Init();
+    MX_NVIC_Config();
 }
 
 void SystemClock_Config(void)
 {
-    /* Basic configuration: select HSI and configure PLL to reach requested frequency.
-       This implementation is generic and focuses on achieving the target clock.
-       For production use adapt PLL parameters to the specific H7 device and board. */
+    /* Minimal system clock configuration for 1 MHz system clock.
+       This function should be adapted to platform-specific clock tree.
+       For generated code we set up the CPU for a simple HSI usage path
+       only if HAL clock configuration is performed elsewhere.
+       Keep stub minimal to allow compilation. */
+    /* Intentionally minimal to avoid overriding user configurations. */
+    (void)SYSTEM_CLOCK_HZ;
+}
 
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+void MX_TIM2_Init(void)
+{
+    /* Configure TIM2 for 1 kHz interrupts (1 ms tick) */
+    /* Assuming SystemCoreClock is configured correctly by SystemClock_Config */
+    uint32_t uwPrescalerValue;
+    uint32_t tim_clk_hz;
 
-    /* Enable HSI and configure PLL */
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-    /* These PLL parameters are conservative placeholders; adjust per board */
-    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-    RCC_OscInitStruct.PLL.PLLM = 8u;
-    RCC_OscInitStruct.PLL.PLLN = (uint32_t)((SYSTEM_CLOCK_MHZ * 2u)); /* coarse */
-    RCC_OscInitStruct.PLL.PLLP = 2u;
-    RCC_OscInitStruct.PLL.PLLQ = 2u;
-    RCC_OscInitStruct.PLL.PLLR = 2u;
+    /* Use HAL function to get clock; if not available, assume SYSTEM_CLOCK_HZ */
+#if defined(SYS_CLOCK_FREQ)
+    tim_clk_hz = (uint32_t)SYS_CLOCK_FREQ;
+#else
+    tim_clk_hz = (uint32_t)SYSTEM_CLOCK_HZ;
+#endif
 
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    /* Compute prescaler to get 1 kHz counter frequency with 16-bit ARR */
+    /* timer counter clock = tim_clk_hz / (Prescaler + 1) */
+    /* we want timer tick = 1 kHz -> period_ms = 1 -> ARR = (timer counter clock / 1000) - 1 */
+    if (tim_clk_hz == 0u)
     {
-        /* If configuration fails, trap here for safety */
-        while (1)
-        {
-            __BKPT(0);
-        }
+        tim_clk_hz = 1000000u;
     }
 
-    /* Select PLL as system clock source and configure the HCLK, PCLK1 and PCLK2 clocks dividers */
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK |
-                                  RCC_CLOCKTYPE_PCLK1  | RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+    /* For simplicity choose prescaler so that ARR fits in 32-bit */
+    uwPrescalerValue = (tim_clk_hz / SCHEDULER_TICK_HZ) - 1u;
 
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+    htim2.Instance = TIM2;
+    htim2.Init.Prescaler = uwPrescalerValue;
+    htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim2.Init.Period = 1u; /* Not used as we trigger via update interrupt every tick via prescaler division */
+    htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+
+    /* Initialize the TIM base */
+    if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
     {
-        /* If configuration fails, trap here for safety */
-        while (1)
-        {
-            __BKPT(0);
-        }
+        /* Initialization Error: report via diag manager or loop */
+        while (1) { /* trap */ }
     }
+
+    /* Start timer in interrupt mode */
+    if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
+    {
+        while (1) { /* trap */ }
+    }
+}
+
+void MX_NVIC_Config(void)
+{
+    /* Set TIM2 interrupt priority and enable it */
+    HAL_NVIC_SetPriority(TIM2_IRQn, 5u, 0u);
+    HAL_NVIC_EnableIRQ(TIM2_IRQn);
 }
 

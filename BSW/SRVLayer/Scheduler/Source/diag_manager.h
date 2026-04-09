@@ -9,11 +9,20 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
-void Diag_Init(void);
-void Diag_ReportFault(uint32_t fault_id);
-void Diag_ClearFault(uint32_t fault_id);
-void Diag_Heartbeat(void);
-void Diag_ServiceWatchdog(void);
+/* Initialize diagnostics manager */
+void DiagManager_Init(void);
+
+/* Periodic diagnostics processing - run from main loop */
+void DiagManager_Process(void);
+
+/* Report a fault to diagnostics manager */
+void DiagManager_ReportFault(uint32_t fault_id);
+
+/* Clear a fault */
+void DiagManager_ClearFault(uint32_t fault_id);
+
+/* Retrieve global fault state */
+bool DiagManager_HasFaults(void);
 
 #ifdef __cplusplus
 }

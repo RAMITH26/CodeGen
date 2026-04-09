@@ -1,74 +1,95 @@
 
 #include "init_handlers.h"
-#include "system_cfg.h"
-#include "diag_manager.h"
 #include "task_config.h"
 
-/* ASW headers */
-#include "CodeGen_Dynamic_address_assignment.h"
-#include "BMS_SOC_Manager.h"
-#include "balancing_asw.h"
+/* Forward declarations for ASW init functions and names.
+   These should be provided by ASW modules; declare as extern so the linker
+   will bind to the ASW implementations. Names are strict per requirements. */
+extern void App_M1_Init(void);
+extern void Demo_Init(void);
+extern void Test_Init(void);
+extern void Release_test_asw_Init(void);
 
-/* Ensure the ASW modules expose the standardized Init/Deinit symbols.
-   The integration layer expects the following symbols to be implemented by the ASW:
-     - Dynamic_address_assignment_Init / Deinit
-     - Soc_estimation_Init / Deinit
-     - Passive_Cell_balancing_Init / Deinit
-   If ASW headers use different names, those headers should provide wrappers.
+/* Deinitialization prototypes */
+extern void App_M1_Deinit(void);
+extern void Demo_Deinit(void);
+extern void Test_Deinit(void);
+extern void Release_test_asw_Deinit(void);
+
+/* Ordered list of init functions.
+   Order determined to ensure system brings up services before dependents.
+   For this project all ASW modules are in Init phase. Order chosen:
+   1) Demo (address managers/services)
+   2) Test (test harness)
+   3) App_M1 (application logic)
+   4) Release_test_asw (top-level ASW)
 */
+static InitFunc_t g_init_list[] =
+{
+#if TASK_ENABLE_DEMO
+    Demo_Init,
+#endif
+#if TASK_ENABLE_TEST
+    Test_Init,
+#endif
+#if TASK_ENABLE_APP_M1
+    App_M1_Init,
+#endif
+#if TASK_ENABLE_RELEASE_TEST
+    Release_test_asw_Init,
+#endif
+};
 
-/* Declarations of standardized init/deinit functions implemented by ASW or by wrappers */
-extern void Dynamic_address_assignment_Init(void);
-extern void Dynamic_address_assignment_Deinit(void);
+/* Ordered list of deinit functions (reverse order of init) */
+static InitFunc_t g_deinit_list[] =
+{
+#if TASK_ENABLE_RELEASE_TEST
+    Release_test_asw_Deinit,
+#endif
+#if TASK_ENABLE_APP_M1
+    App_M1_Deinit,
+#endif
+#if TASK_ENABLE_TEST
+    Test_Deinit,
+#endif
+#if TASK_ENABLE_DEMO
+    Demo_Deinit,
+#endif
+};
 
-extern void Soc_estimation_Init(void);
-extern void Soc_estimation_Deinit(void);
+static uint32_t g_init_count = (uint32_t)(sizeof(g_init_list) / sizeof(g_init_list[0]));
+static uint32_t g_deinit_count = (uint32_t)(sizeof(g_deinit_list) / sizeof(g_deinit_list[0]));
 
-extern void Passive_Cell_balancing_Init(void);
-extern void Passive_Cell_balancing_Deinit(void);
-
-/* Initialization ordering:
-   1) All modules with execution_phase == Init
-      - Soc_estimation (Init)
-      - Passive_Cell_balancing (Init)
-   2) System services (e.g., CAN, GPIO) are assumed initialized by ASW or system init
-   3) Modules with execution_phase == Run
-      - Dynamic_address_assignment (Run)
-*/
+void InitHandlers_RegisterAll(void)
+{
+    /* No dynamic registration required in static generated code.
+       Function retained for API completeness. */
+    /* Intentionally empty */
+    (void)g_init_count;
+    (void)g_deinit_count;
+}
 
 void InitHandlers_InitAll(void)
 {
-    /* System-level init already done in main: System_Init(), HAL, clocks */
-    Diag_Init();
-
-    /* Init phase modules */
-#if (ENABLE_SOC_ESTIMATION != 0u)
-    Soc_estimation_Init();
-#endif
-
-#if (ENABLE_PASSIVE_CELL_BALANCING != 0u)
-    Passive_Cell_balancing_Init();
-#endif
-
-    /* Run phase modules */
-#if (ENABLE_DYNAMIC_ADDRESS_ASSIGNMENT != 0u)
-    Dynamic_address_assignment_Init();
-#endif
+    uint32_t i;
+    for (i = 0u; i < g_init_count; ++i)
+    {
+        if (g_init_list[i] != (InitFunc_t)0u)
+        {
+            g_init_list[i]();
+        }
+    }
 }
 
 void InitHandlers_DeinitAll(void)
 {
-    /* Deinit in reverse order to respect dependency teardown */
-#if (ENABLE_DYNAMIC_ADDRESS_ASSIGNMENT != 0u)
-    Dynamic_address_assignment_Deinit();
-#endif
-
-#if (ENABLE_PASSIVE_CELL_BALANCING != 0u)
-    Passive_Cell_balancing_Deinit();
-#endif
-
-#if (ENABLE_SOC_ESTIMATION != 0u)
-    Soc_estimation_Deinit();
-#endif
+    uint32_t i;
+    for (i = 0u; i < g_deinit_count; ++i)
+    {
+        if (g_deinit_list[i] != (InitFunc_t)0u)
+        {
+            g_deinit_list[i]();
+        }
+    }
 }
 
